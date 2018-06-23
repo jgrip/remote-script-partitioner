@@ -30,9 +30,6 @@ $ cat /proc/cmdline
 [..] part_script=http://pxe.example.com/script/partition.sh
 ```
 
-Example from `debian-preseed`:<br/>
-<https://github.com/bfritz/debian-preseed/blob/scripted-partitioning/config/preseed.cfg.in#L4>
-
 The partitioner package can be downloaded and run from
 `preseed/early_command`, e.g.:
 
@@ -42,149 +39,90 @@ d-i preseed/early_command string \
   && udpkg --unpack /tmp/partitioner.udeb
 ```
 
-Example from `debian-preseed`:<br/>
-<https://github.com/bfritz/debian-preseed/blob/scripted-partitioning/config/vbox.conf#L21>
-
-
 ### Script Example
 
 Below is an example script for GPT + dm-crypt + LVM.  This script:
 
-* partitions the first disk with a GUID Partition Table (GPT)
-* creates a small `biosboot` partition, 500MB `boot` partition
-  and uses the rest of the first disk for an encrypted partition
-* encrypts the large patition with `cryptsetup`
-* adds the encrypted partition to a LVM volume group
-* creates 1G `/` and 2G `/home` volumes with ext4 partitions
+Below is an example using two disks.
+One disk holds /boot, the other disk is a LVM2 PV without parition table,
+allowing resized without rebooting when running as a VM.
 
-**CAUTION**: If you use this script as-is, change the encryption key
-afterward, e.g.  `cryptsetup luksChangeKey /dev/sda3 --verify-passphrase`!
+* Requires two harddisks in fixed order, first disk is /boot with 1GB,
+  second disk is 10GB+ and holds the LVM PV.
+* Hardwired with ext3 for /boot, FSTYPE controls the other partitions.
 
 ```bash
 #!/bin/sh
 
-set -e
+logger -t "$TAG" "Detecting disks"
+BOOT=$(list-devices disk | head -n1)
+MAIN=$(list-devices disk | tail -n1)
+FSTYPE=ext4
 
-PV_NAME=vg0
-FS=ext4
-BOOT_SIZE=500MB
-ROOT_SIZE=1G
-HOME_SIZE=2G
-PASSPHRASE=t0ps3cr3t
+logger -t "$TAG" "Bootdisk $BOOT, Main disk $MAIN"
 
-BOOT_PART_N=2
-CRYPT_PART_N=3
-
-# TAG variable is exported from `postinst.sh` in package before
-# executing this script.
-
-FIRST_DISK=$(list-devices disk | head -n1)
-logger -t "$TAG" "FIRST_DISK: $FIRST_DISK"
-
-BOOT_DEV=$FIRST_DISK$BOOT_PART_N
-logger -t "$TAG" "BOOT_DEV: $BOOT_DEV"
-
-# partition $FIRST_DISK with GUID partition table
+# Create /boot
+logger -t "$TAG" "Creating /boot"
 anna-install parted-udeb
+log-output -t "$TAG" parted -s --align=opt $BOOT -- mklabel msdos mkpart primary 1M 1000M
 
-dd if=/dev/zero of=$FIRST_DISK bs=1M count=1
-
-logger -t "$TAG" "Cleared old partition table by writing zeros to start of $FIRST_DISK ."
-
-logger -t "$TAG" "Partitioning $FIRST_DISK ."
-log-output -t "$TAG" parted                -- $FIRST_DISK mklabel gpt
-log-output -t "$TAG" parted                -- $FIRST_DISK mkpart biosboot 8192s 16383s
-log-output -t "$TAG" parted                -- $FIRST_DISK set 1 bios_grub on
-
-log-output -t "$TAG" parted --align=opt    -- $FIRST_DISK mkpart boot 16384s $BOOT_SIZE
-log-output -t "$TAG" parted                -- $FIRST_DISK set 2 boot on
-
-log-output -t "$TAG" parted --align=opt -s -- $FIRST_DISK mkpart pv_$PV_NAME $BOOT_SIZE -1
-
-log-output -t "$TAG" parted                -- $FIRST_DISK print
-
-
-# install cryptsetup and necessary crypto modules
-anna-install crypto-modules crypto-dm-modules cryptsetup-udeb
-
-depmod -ae
-modprobe dm-mod
-modprobe dm-crypt
-modprobe aes
-
-DEV="$FIRST_DISK$CRYPT_PART_N"
-CRYPT_NAME=`echo $DEV | cut -d/ -f3`_crypt
-KEYFILE=/tmp/keyfile
-
-if [ ! -b "$DEV" ]; then
-    error "$DEV is not a block special device, refusing to encrypt it."
-    exit 1
-fi
-
-logger -t "$TAG" "Making $DEV an encrypted partition"
-if [ ! -e "$KEYFILE" ]; then
-    echo -n "$PASSPHRASE" > "$KEYFILE"
-    logger -t "$TAG" 'Using WEAK PASSPHRASE!!! Change key after installation finishes!'
-fi
-
-#logger -t "$TAG" "Zeroing $DEV prior to setting up LUKS encryption."
-#log-output -t "$TAG" dd if=/dev/zero of="$DEV" bs=1M
-
-echo YES | log-output -t "$TAG" cryptsetup -d "$KEYFILE" luksFormat "$DEV"
-
-log-output -t "$TAG" cryptsetup -d "$KEYFILE" luksOpen "$DEV" $CRYPT_NAME
-
-# install LVM tools and create volume groups
+# Create volume group
+logger -t "$TAG" "Installing LVM2"
 anna-install lvm2-udeb
+logger -t "$TAG" "Creating PV"
+log-output -t "$TAG" pvcreate $MAIN
+logger -t "$TAG" "Creating VG"
+log-output -t "$TAG" vgcreate vg0 $MAIN
 
-log-output -t "$TAG" pvcreate /dev/mapper/$CRYPT_NAME
-log-output -t "$TAG" vgcreate $PV_NAME /dev/mapper/$CRYPT_NAME
+# Create logical volumes
+logger -t "$TAG" "Creating LVs"
+sleep 2
+log-output -t "$TAG" lvcreate -n root -L 2G vg0
+log-output -t "$TAG" lvcreate -n var -L 3G vg0
+log-output -t "$TAG" lvcreate -n varlog -L 2G vg0
+log-output -t "$TAG" lvcreate -n tmp -L 1G vg0
+log-output -t "$TAG" lvcreate -n home -L 1G vg0
 
-log-output -t "$TAG" lvcreate -n root -L $ROOT_SIZE $PV_NAME
-log-output -t "$TAG" lvcreate -n home -L $HOME_SIZE $PV_NAME
+# Create filesystems
+log-output -t "$TAG" mkfs.ext3 -q ${BOOT}1 -L boot
 
-# partition /boot and LVM volumes
-log-output -t "$TAG" mkfs.$FS -L boot $BOOT_DEV
+for F in root var tmp home; do
+    log-output -t "$TAG" mkfs.${FSTYPE} -q -L $F /dev/mapper/vg0-$F
+done;
 
-for F in root home; do
-    log-output -t "$TAG" mkfs.$FS -L $F /dev/mapper/${PV_NAME}-$F
+log-output -t "$TAG" mkfs.ext3 -q /dev/mapper/vg0-varlog -L varlog
+
+# Mount filesystems
+log-output -t "$TAG" mkdir /target
+log-output -t "$TAG" mount -t ${FSTYPE} /dev/mapper/vg0-root /target
+log-output -t "$TAG" mkdir /target/boot
+log-output -t "$TAG" mount -t ext3 ${BOOT}1 /target/boot
+
+for F in var tmp home; do
+    log-output -t "$TAG" mkdir /target/$F
+    log-output -t "$TAG" mount -t ${FSTYPE} /dev/mapper/vg0-$F /target/$F
 done
 
-# Debian installer expects partitions mounted at /target
-mkdir -p /target
-mount -t $FS /dev/mapper/${PV_NAME}-root /target
+log-output -t "$TAG" mkdir /target/var/log
+log-output -t "$TAG" mount -t ${FSTYPE} /dev/mapper/vg0-varlog /target/var/log
 
-mkdir /target/boot
-mount -t $FS $BOOT_DEV /target/boot
-
-for F in home; do
-    mkdir /target/$F
-    mount -t $FS /dev/mapper/${PV_NAME}-$F /target/$F
-done
-
-eval `blkid -o udev $BOOT_DEV`
-logger -t "$TAG" "UUID of boot device ($BOOT_DEV) is $ID_FS_UUID"
-
-logger -t "$TAG" "Preparing /etc/fstab"
+# Create fstab
 mkdir /target/etc
-cat <<EOF > /target/etc/fstab
-/dev/mapper/${PV_NAME}-root /     $FS defaults,noatime 0 1
-UUID=$ID_FS_UUID  /boot $FS defaults,ro      0 1
+cat <<EOF >/target/etc/fstab
+/dev/mapper/vg0-root   /           ${FSTYPE}    defaults,relatime   0   0
+/dev/mapper/vg0-home   /home       ${FSTYPE}    defaults,relatime   0   1
+/dev/mapper/vg0-var    /var        ${FSTYPE}    defaults,relatime   0   1
+/dev/mapper/vg0-varlog /var/log    ${FSTYPE}    defaults,relatime   0   1
+/dev/mapper/vg0-tmp    /tmp        ${FSTYPE}    defaults,relatime   0   1
+${BOOT}1       /boot       ext3    defaults,relatime   0   1
 EOF
 
-for F in home; do
-    echo "/dev/mapper/${PV_NAME}-$F /$F $FS defaults,noatime 0 2" >> /target/etc/fstab
-done
+# Set bootloader disk
+debconf-set grub-installer/bootdev $BOOT
 
-CRYPT_DEV_UUID=`cryptsetup luksUUID "$DEV"`
-logger -t "$TAG" "UUID of encrypted device ($DEV) is $CRYPT_DEV_UUID"
-echo "$CRYPT_NAME UUID=$CRYPT_DEV_UUID none luks" > /target/etc/crypttab
-
-logger -t "$TAG" "Installing cryptsetup and lvm2 packages to target system."
-log-output -t "$TAG" apt-install cryptsetup || true
+# Trigger lvm2 package to be installed so we can boot
+logger -t "$TAG" "Installing lvm2 on target"
 log-output -t "$TAG" apt-install lvm2 || true
-
-debconf-set grub-installer/bootdev $FIRST_DISK
 
 # long sleep can be handy for debugging, e.g. to inspect /var/log/syslog
 # sleep 180

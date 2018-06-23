@@ -8,7 +8,7 @@ challange.  `remote-script-partitioner` makes it easy to bypass the
 built-in templates and write a shell script to partition your disks.
 
 This package disables `partman` in the Debian installer, downloads
-your `partitioner` script via TFTP and executes it.
+your `partitioner` script via wget and executes it.
 
 ### Building
 
@@ -21,13 +21,13 @@ make udeb
 
 ### Configuration
 
-The partitioner expects `tftp_server` to be set on the kernel
+The partitioner expects `part_script` to be set on the kernel
 command line.  It downloads and executes a script named
-`partitioner` from the root of the TFTP server.
+`partitioner` from the root using wget.
 
 ```bash
 $ cat /proc/cmdline
-[..] tftp_server=192.168.56.1
+[..] part_script=http://pxe.example.com/script/partition.sh
 ```
 
 Example from `debian-preseed`:<br/>
@@ -38,7 +38,7 @@ The partitioner package can be downloaded and run from
 
 ```bash
 d-i preseed/early_command string \
-  tftp -g 192.168.56.1 -r remote-script-partitioner_0.0.1_all.udeb -l /tmp/partitioner.udeb \
+  wget http://pxe.example.com/udeb/remote-script-partitioner_0.0.1_all.udeb -O /tmp/partitioner.udeb \
   && udpkg --unpack /tmp/partitioner.udeb
 ```
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 
 TAG="remote-partitioner"
-SERVER=$(sed -n 's/.*tftp_server=\([^ ]\+\).*/\1/p' /proc/cmdline)
+PARTURL=$(sed -n 's/.*part_script=\([^ ]\+\).*/\1/p' /proc/cmdline)
 SCRIPT=partitioner
 
 # make $TAG available to partitioning script
@@ -12,7 +12,7 @@ logger -t "$TAG" "Disabled partman."
 
 logger -t "$TAG" "Starting disk partition."
 logger -t "$TAG" "Downloading $SCRIPT from $SERVER."
-tftp -g $SERVER -r "$SCRIPT" -l "/tmp/$SCRIPT" \
+wget $PARTURL -O "/tmp/$SCRIPT" \
     && chmod 755 "/tmp/$SCRIPT" \
     && "/tmp/$SCRIPT"
 
